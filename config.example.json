@@ -1,0 +1,12 @@
+{
+    "imap_server": "imap.gmail.com",
+    "imap_port": 993,
+    "email_address": "your-receiving-email@gmail.com",
+    "email_password": "your-app-password",
+    "discord_webhook": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
+    "folder": "INBOX",
+    "search_criteria": "UNSEEN",
+    "mark_as_read": true,
+    "poll_interval": 60,
+    "subject_filter": "Your Netflix temporary access code"
+}
