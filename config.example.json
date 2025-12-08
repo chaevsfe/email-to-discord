@@ -18,7 +18,10 @@
             "emoji": "🎬",
             "title": "Netflix Access Code Requested",
             "color": 14423100,
-            "webhook": "https://discord.com/api/webhooks/NETFLIX_CHANNEL_WEBHOOK",
+            "webhooks": [
+                "https://discord.com/api/webhooks/SERVER1_NETFLIX_CHANNEL",
+                "https://discord.com/api/webhooks/SERVER2_NETFLIX_CHANNEL"
+            ],
             "link_patterns": [
                 "<a[^>]+href=[\"']([^\"']*netflix[^\"']*)[\"'][^>]*>\\s*Get Code",
                 "<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>\\s*Get\\s*Code\\s*</a>"
