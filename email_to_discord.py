@@ -188,11 +188,14 @@ def extract_template_info(body: str, html: str, template: dict) -> dict:
 
     return info
 
-def send_to_discord(webhook_url: str, subject: str, sender: str, body: str, html: str, timestamp: str, templates: dict):
+def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, html: str, timestamp: str, templates: dict):
     """Send an email notification to Discord via webhook."""
 
     # Try to find a matching template
     template_name, template = find_matching_template(subject, templates)
+
+    # Use template webhook if defined, otherwise use default
+    webhook_url = template.get('webhook', default_webhook) if template else default_webhook
 
     if template:
         # Use template-based formatting
