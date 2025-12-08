@@ -194,8 +194,15 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
     # Try to find a matching template
     template_name, template = find_matching_template(subject, templates)
 
-    # Use template webhook if defined, otherwise use default
-    webhook_url = template.get('webhook', default_webhook) if template else default_webhook
+    # Get webhook(s) - support both single 'webhook' and multiple 'webhooks'
+    if template:
+        webhooks = template.get('webhooks', [])
+        if not webhooks:
+            # Fall back to single webhook
+            single_webhook = template.get('webhook', default_webhook)
+            webhooks = [single_webhook]
+    else:
+        webhooks = [default_webhook]
 
     if template:
         # Use template-based formatting
@@ -274,14 +281,33 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
         "embeds": [embed]
     }
 
-    try:
-        response = requests.post(webhook_url, json=payload, timeout=10)
-        response.raise_for_status()
-        logger.info(f"Successfully sent email to Discord: {subject}")
-        return True
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to send to Discord: {e}")
-        return False
+    # Send to all webhooks with retry logic
+    success = False
+    for webhook_url in webhooks:
+        webhook_success = False
+        retries = 3
+        delay = 2  # Start with 2 second delay
+
+        for attempt in range(retries):
+            try:
+                response = requests.post(webhook_url, json=payload, timeout=10)
+                response.raise_for_status()
+                logger.info(f"Successfully sent to webhook: {webhook_url[:50]}...")
+                webhook_success = True
+                success = True
+                break
+            except requests.exceptions.RequestException as e:
+                if attempt < retries - 1:
+                    logger.warning(f"Webhook failed (attempt {attempt + 1}/{retries}), retrying in {delay}s: {e}")
+                    time.sleep(delay)
+                    delay *= 2  # Exponential backoff
+                else:
+                    logger.error(f"Failed to send to webhook after {retries} attempts: {webhook_url[:50]}... - {e}")
+
+    if success:
+        logger.info(f"Email forwarded to Discord: {subject}")
+
+    return success
 
 def connect_to_imap(config: dict) -> imaplib.IMAP4_SSL:
     """Connect to the IMAP server."""
