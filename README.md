@@ -1,6 +1,6 @@
 # Email to Discord Forwarder
 
-A Python script that monitors an email inbox and forwards new emails to a Discord channel via webhook. Perfect for receiving notifications when Gmail forwards emails to a secondary address.
+A Python script that monitors an email inbox and forwards Netflix emails to a Discord channel via webhook.
 
 ## How It Works
 
