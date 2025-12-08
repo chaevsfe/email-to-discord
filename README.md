@@ -4,7 +4,7 @@ Forward emails from Gmail to Discord with customizable templates for different s
 
 ## How It Works
 
-1. Gmail auto-forwards emails to a receiving email address (e.g., DuckDuckGo email)
+1. Gmail auto-forwards emails to a receiving email address
 2. This script monitors that inbox via IMAP
 3. Emails matching your filters are sent to Discord with nice formatting
 4. Templates extract links and info automatically (like Netflix "Get Code" links)
