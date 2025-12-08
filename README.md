@@ -18,7 +18,7 @@ On your main Gmail account:
 2. Click "Add a forwarding address"
 3. Enter your receiving email (the one this script will monitor)
 4. Confirm via the verification email
-5. Select "Forward a copy of incoming mail to..."
+5. Select "Forward a copy of incoming mail to..." or create a custom filter
 
 ### 2. Create Discord Webhook(s)
 
