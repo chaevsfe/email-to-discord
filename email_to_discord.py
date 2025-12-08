@@ -161,6 +161,16 @@ def extract_template_info(body: str, html: str, template: dict) -> dict:
 
     info = {}
 
+    # Extract code using code_pattern if defined
+    code_pattern = template.get('code_pattern')
+    if code_pattern:
+        try:
+            match = re.search(code_pattern, body, re.IGNORECASE)
+            if match:
+                info['code'] = match.group(1)
+        except re.error as e:
+            logger.warning(f"Invalid code_pattern: {code_pattern} - {e}")
+
     # Extract info using info_pattern if defined
     info_pattern = template.get('info_pattern')
     if info_pattern:
@@ -208,47 +218,67 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
         # Use template-based formatting
         template_info = extract_template_info(body, html, template)
 
-        fields = []
-        if template_info.get('name'):
-            fields.append({
-                "name": "Requested By",
-                "value": template_info['name'],
-                "inline": True
-            })
-        if template_info.get('device'):
-            fields.append({
-                "name": "Device",
-                "value": template_info['device'],
-                "inline": True
-            })
-        if template_info.get('time'):
-            fields.append({
-                "name": "Time",
-                "value": template_info['time'],
-                "inline": False
-            })
-
-        # Build description with link if found
-        description = "Someone requested a temporary access code."
-        if template_info.get('link'):
-            description += f"\n\n**[Click here to Get Code]({template_info['link']})**\n\n⚠️ Link expires in 15 minutes"
-        else:
-            description += " Check your email to approve."
-
         emoji = template.get('emoji', '📧')
         title = template.get('title', f'{template_name.title()} Code Requested')
         color = template.get('color', 3447003)
 
-        embed = {
-            "title": f"{emoji} {title}",
-            "description": description,
-            "color": color,
-            "fields": fields if fields else [{"name": "Info", "value": "Check email for details", "inline": False}],
-            "footer": {
-                "text": f"{template_name.title()} Access Code"
-            },
-            "timestamp": datetime.now().isoformat()
-        }
+        # Check if we have a code to display prominently
+        if template_info.get('code'):
+            # Code found - display it prominently
+            embed = {
+                "title": f"{emoji} {title}",
+                "color": color,
+                "fields": [
+                    {
+                        "name": "Your Code",
+                        "value": f"```{template_info['code']}```",
+                        "inline": False
+                    }
+                ],
+                "footer": {
+                    "text": f"{template_name.title()} Code • Expires in 15 minutes"
+                },
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            # No code - use standard template formatting
+            fields = []
+            if template_info.get('name'):
+                fields.append({
+                    "name": "Requested By",
+                    "value": template_info['name'],
+                    "inline": True
+                })
+            if template_info.get('device'):
+                fields.append({
+                    "name": "Device",
+                    "value": template_info['device'],
+                    "inline": True
+                })
+            if template_info.get('time'):
+                fields.append({
+                    "name": "Time",
+                    "value": template_info['time'],
+                    "inline": False
+                })
+
+            # Build description with link if found
+            description = "Someone requested a temporary access code."
+            if template_info.get('link'):
+                description += f"\n\n**[Click here to Get Code]({template_info['link']})**\n\n⚠️ Link expires in 15 minutes"
+            else:
+                description += " Check your email to approve."
+
+            embed = {
+                "title": f"{emoji} {title}",
+                "description": description,
+                "color": color,
+                "fields": fields if fields else [{"name": "Info", "value": "Check email for details", "inline": False}],
+                "footer": {
+                    "text": f"{template_name.title()} Access Code"
+                },
+                "timestamp": datetime.now().isoformat()
+            }
     else:
         # Fallback: Standard email formatting (raw email)
         embed = {
