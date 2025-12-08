@@ -40,7 +40,7 @@ PROCESSED_FILE = 'processed_emails.json'
 def load_config(config_path: str = 'config.json') -> dict:
     """Load configuration from JSON file."""
     try:
-        with open(config_path, 'r') as f:
+        with open(config_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except FileNotFoundError:
         logger.error(f"Config file not found: {config_path}")
