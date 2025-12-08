@@ -1,0 +1,51 @@
+{
+    "imap_server": "imap.gmail.com",
+    "imap_port": 993,
+    "email_address": "your-receiving-email@gmail.com",
+    "email_password": "your-app-password",
+    "folder": "INBOX",
+    "search_criteria": "UNSEEN",
+    "mark_as_read": true,
+    "poll_interval": 60,
+
+    "discord_webhook": "https://discord.com/api/webhooks/DEFAULT_WEBHOOK",
+    "subject_filters": [
+        "netflix",
+        "hbo",
+        "disney",
+        "verification",
+        "passcode",
+        "sign-in code"
+    ],
+    "templates": {
+        "netflix_access": {
+            "subject_contains": "Your Netflix temporary access code",
+            "emoji": "🎬",
+            "title": "Netflix Access Code Requested",
+            "color": 14423100,
+            "link_patterns": [
+                "<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>\\s*Get\\s*Code"
+            ],
+            "info_pattern": "Requested by\\s+(\\w+)\\s+from\\s+(?:a\\s+)?(.+?)\\s+at\\s+(.+?)(?:\n|Get Code)"
+        },
+        "netflix_signin": {
+            "subject_contains": "Your sign-in code",
+            "emoji": "🎬",
+            "title": "Netflix Sign-In Code",
+            "color": 14423100,
+            "code_pattern": "Enter this code to sign in\\s+(\\d{4,6})"
+        },
+        "hbo": {
+            "subject_contains": "Time Sensitive: Your One-Time HBO Max Code",
+            "emoji": "📺",
+            "title": "HBO Max Code Requested",
+            "color": 9932887
+        },
+        "disney": {
+            "subject_contains": "Your one-time passcode",
+            "emoji": "🏰",
+            "title": "Disney+ Code Requested",
+            "color": 1738207
+        }
+    }
+}
