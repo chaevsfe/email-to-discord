@@ -147,86 +147,100 @@ def truncate_text(text: str, max_length: int = 1900) -> str:
         return text
     return text[:max_length] + "...\n\n[Message truncated]"
 
-def extract_netflix_info(body: str, html: str) -> dict:
-    """Extract Netflix request info from email body and HTML."""
+def find_matching_template(subject: str, templates: dict) -> tuple:
+    """Find a template that matches the email subject."""
+    subject_lower = subject.lower()
+    for name, template in templates.items():
+        if template.get('subject_contains', '').lower() in subject_lower:
+            return name, template
+    return None, None
+
+def extract_template_info(body: str, html: str, template: dict) -> dict:
+    """Extract info from email using template patterns."""
     import re
 
     info = {}
 
-    # Try to find who requested it (e.g., "Requested by jason from a Apple - iPhone")
-    requested_match = re.search(r'Requested by\s+(\w+)\s+from\s+(?:a\s+)?(.+?)\s+at\s+(.+?)(?:\n|Get Code)', body, re.IGNORECASE)
-    if requested_match:
-        info['name'] = requested_match.group(1)
-        info['device'] = requested_match.group(2).strip()
-        info['time'] = requested_match.group(3).strip()
+    # Extract info using info_pattern if defined
+    info_pattern = template.get('info_pattern')
+    if info_pattern:
+        match = re.search(info_pattern, body, re.IGNORECASE)
+        if match:
+            groups = match.groups()
+            if len(groups) >= 1:
+                info['name'] = groups[0]
+            if len(groups) >= 2:
+                info['device'] = groups[1].strip() if groups[1] else None
+            if len(groups) >= 3:
+                info['time'] = groups[2].strip() if groups[2] else None
 
-    # Extract the "Get Code" link from HTML
-    if html:
-        # Look for link with "Get Code" text or netflix URL patterns
-        link_patterns = [
-            r'<a[^>]+href=["\']([^"\']*netflix[^"\']*(?:getcode|get-code|access|token)[^"\']*)["\'][^>]*>',
-            r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>\s*Get Code\s*</a>',
-            r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>\s*Get\s+Code\s*</a>',
-            r'href=["\']([^"\']*netflix\.com[^"\']*)["\'][^>]*>\s*Get',
-        ]
+    # Extract link using link_patterns if defined
+    link_patterns = template.get('link_patterns', [])
+    if html and link_patterns:
         for pattern in link_patterns:
-            link_match = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
-            if link_match:
-                info['link'] = link_match.group(1)
-                break
+            try:
+                match = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
+                if match:
+                    info['link'] = match.group(1)
+                    break
+            except re.error as e:
+                logger.warning(f"Invalid regex pattern: {pattern} - {e}")
 
     return info
 
-def send_to_discord(webhook_url: str, subject: str, sender: str, body: str, html: str, timestamp: str):
+def send_to_discord(webhook_url: str, subject: str, sender: str, body: str, html: str, timestamp: str, templates: dict):
     """Send an email notification to Discord via webhook."""
 
-    # Check if this is a Netflix access code email
-    is_netflix = "netflix" in subject.lower() and "access code" in subject.lower()
+    # Try to find a matching template
+    template_name, template = find_matching_template(subject, templates)
 
-    if is_netflix:
-        # Extract Netflix-specific info
-        netflix_info = extract_netflix_info(body, html)
+    if template:
+        # Use template-based formatting
+        template_info = extract_template_info(body, html, template)
 
         fields = []
-        if netflix_info.get('name'):
+        if template_info.get('name'):
             fields.append({
                 "name": "Requested By",
-                "value": netflix_info['name'],
+                "value": template_info['name'],
                 "inline": True
             })
-        if netflix_info.get('device'):
+        if template_info.get('device'):
             fields.append({
                 "name": "Device",
-                "value": netflix_info['device'],
+                "value": template_info['device'],
                 "inline": True
             })
-        if netflix_info.get('time'):
+        if template_info.get('time'):
             fields.append({
                 "name": "Time",
-                "value": netflix_info['time'],
+                "value": template_info['time'],
                 "inline": False
             })
 
-        # Add the Get Code link if found
+        # Build description with link if found
         description = "Someone requested a temporary access code."
-        if netflix_info.get('link'):
-            description += f"\n\n**[Click here to Get Code]({netflix_info['link']})**\n\n⚠️ Link expires in 15 minutes"
+        if template_info.get('link'):
+            description += f"\n\n**[Click here to Get Code]({template_info['link']})**\n\n⚠️ Link expires in 15 minutes"
         else:
             description += " Check your email to approve."
 
-        # Special formatting for Netflix - clean and simple
+        emoji = template.get('emoji', '📧')
+        title = template.get('title', f'{template_name.title()} Code Requested')
+        color = template.get('color', 3447003)
+
         embed = {
-            "title": "🎬 Netflix Access Code Requested",
+            "title": f"{emoji} {title}",
             "description": description,
-            "color": 14423100,  # Netflix red
+            "color": color,
             "fields": fields if fields else [{"name": "Info", "value": "Check email for details", "inline": False}],
             "footer": {
-                "text": "Netflix Temporary Access Code"
+                "text": f"{template_name.title()} Access Code"
             },
             "timestamp": datetime.now().isoformat()
         }
     else:
-        # Standard email formatting
+        # Fallback: Standard email formatting (raw email)
         embed = {
             "title": f"📧 {truncate_text(subject, 250)}",
             "color": 3447003,  # Blue color
@@ -326,17 +340,30 @@ def check_for_new_emails(mail: imaplib.IMAP4_SSL, config: dict, processed_ids: s
 
                 logger.info(f"Processing email: {subject} from {sender}")
 
-                # Check subject filter if configured
-                subject_filter = config.get('subject_filter')
-                if subject_filter and subject_filter.lower() not in subject.lower():
-                    logger.debug(f"Skipping email - subject doesn't match filter: {subject}")
-                    processed_ids.add(email_id_str)
-                    if config.get('mark_as_read', True):
-                        mail.store(email_id, '+FLAGS', '\\Seen')
-                    continue
+                # Check subject filters if configured
+                subject_filters = config.get('subject_filters', [])
+                subject_filter = config.get('subject_filter')  # Legacy single filter support
+
+                # Convert legacy single filter to list
+                if subject_filter and not subject_filters:
+                    subject_filters = [subject_filter]
+
+                # Check if subject matches any filter
+                if subject_filters:
+                    subject_lower = subject.lower()
+                    matches = any(f.lower() in subject_lower for f in subject_filters)
+                    if not matches:
+                        logger.debug(f"Skipping email - subject doesn't match filters: {subject}")
+                        processed_ids.add(email_id_str)
+                        if config.get('mark_as_read', True):
+                            mail.store(email_id, '+FLAGS', '\\Seen')
+                        continue
+
+                # Get templates from config
+                templates = config.get('templates', {})
 
                 # Send to Discord
-                if send_to_discord(config['discord_webhook'], subject, sender, body, html, date):
+                if send_to_discord(config['discord_webhook'], subject, sender, body, html, date, templates):
                     processed_ids.add(email_id_str)
 
                     # Mark as read if configured
