@@ -168,7 +168,8 @@ Templates let you customize how different email types are displayed.
 | `emoji` | Emoji for the Discord title |
 | `title` | Discord embed title |
 | `color` | Embed color (decimal) |
-| `webhook` | Override webhook for this template (optional) |
+| `webhook` | Single webhook URL for this template (optional) |
+| `webhooks` | Array of webhook URLs to send to multiple servers (optional) |
 | `link_patterns` | Regex patterns to extract links from HTML |
 | `info_pattern` | Regex to extract requester info (name, device, time) |
 
@@ -182,12 +183,9 @@ Templates let you customize how different email types are displayed.
 
 ### Multiple Webhooks
 
-Send different services to different Discord channels:
-
+**Send to different channels per service:**
 ```json
 {
-    "discord_webhook": "https://discord.com/api/webhooks/DEFAULT",
-
     "templates": {
         "netflix": {
             "webhook": "https://discord.com/api/webhooks/NETFLIX_CHANNEL",
@@ -196,13 +194,35 @@ Send different services to different Discord channels:
         "hbo": {
             "webhook": "https://discord.com/api/webhooks/HBO_CHANNEL",
             ...
-        },
-        "disney": {
-            ...  // Uses default webhook (no override)
         }
     }
 }
 ```
+
+**Send to multiple servers at once:**
+```json
+{
+    "templates": {
+        "netflix": {
+            "webhooks": [
+                "https://discord.com/api/webhooks/SERVER1_CHANNEL",
+                "https://discord.com/api/webhooks/SERVER2_CHANNEL"
+            ],
+            ...
+        }
+    }
+}
+```
+
+If no `webhook` or `webhooks` is specified, the default `discord_webhook` is used.
+
+### Retry Logic
+
+When a webhook fails (network issues, Discord down, etc.):
+- Retries **3 times** with exponential backoff (2s, 4s, 8s delays)
+- If all attempts fail, tries the next webhook in the list
+- If **all webhooks fail**, the email stays unread and will be retried on the next poll cycle
+- Emails are never lost - they remain in the inbox until successfully sent
 
 ## Configuration Reference
 
