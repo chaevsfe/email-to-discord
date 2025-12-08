@@ -8,5 +8,32 @@
     "search_criteria": "UNSEEN",
     "mark_as_read": true,
     "poll_interval": 60,
-    "subject_filter": "Your Netflix temporary access code"
+
+    "subject_filters": ["netflix", "hbo", "disney", "access code", "verification"],
+
+    "templates": {
+        "netflix": {
+            "subject_contains": "netflix",
+            "emoji": "🎬",
+            "title": "Netflix Access Code Requested",
+            "color": 14423100,
+            "link_patterns": [
+                "<a[^>]+href=[\"']([^\"']*netflix[^\"']*)[\"'][^>]*>\\s*Get Code",
+                "<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>\\s*Get\\s*Code\\s*</a>"
+            ],
+            "info_pattern": "Requested by\\s+(\\w+)\\s+from\\s+(?:a\\s+)?(.+?)\\s+at\\s+(.+?)(?:\\n|Get Code)"
+        },
+        "hbo": {
+            "subject_contains": "hbo",
+            "emoji": "📺",
+            "title": "HBO Max Code Requested",
+            "color": 9932887
+        },
+        "disney": {
+            "subject_contains": "disney",
+            "emoji": "🏰",
+            "title": "Disney+ Code Requested",
+            "color": 1738207
+        }
+    }
 }
