@@ -1,180 +1,272 @@
-# Email Code to Discord Forwarder
+# Email to Discord Forwarder
 
-A Python script that monitors an email inbox and forwards emails to a Discord channel via webhook.
+Forward emails from Gmail to Discord with customizable templates for different services (Netflix, HBO, Disney+, etc.).
 
 ## How It Works
 
-1. Gmail auto-forwards emails to a receiving email address
-2. This script polls the receiving email inbox via IMAP
-3. New emails are sent to your Discord channel via webhook
+1. Gmail auto-forwards emails to a receiving email address (e.g., DuckDuckGo email)
+2. This script monitors that inbox via IMAP
+3. Emails matching your filters are sent to Discord with nice formatting
+4. Templates extract links and info automatically (like Netflix "Get Code" links)
 
-## Setup
+## Quick Start (Windows)
 
-### Step 1: Create a Receiving Email Account
-
-You can use any email provider that supports IMAP. Here are common options:
-
-**Gmail (Recommended):**
-- Create a new Gmail account or use an existing one
-- IMAP Server: `imap.gmail.com`
-- Port: `993`
-
-**Outlook/Hotmail:**
-- IMAP Server: `outlook.office365.com`
-- Port: `993`
-
-### Step 2: Enable IMAP Access
-
-**For Gmail:**
-1. Go to Gmail Settings > See all settings
-2. Click "Forwarding and POP/IMAP" tab
-3. Enable IMAP access
-4. Save changes
-
-### Step 3: Create an App Password (Gmail)
-
-Gmail requires an "App Password" instead of your regular password:
-
-1. Go to your Google Account > Security
-2. Enable 2-Step Verification if not already enabled
-3. Go to Security > 2-Step Verification > App passwords
-4. Select "Mail" and "Windows Computer"
-5. Click Generate
-6. Copy the 16-character password (use this in config.json)
-
-### Step 4: Set Up Gmail Forwarding
+### 1. Set Up Gmail Forwarding
 
 On your main Gmail account:
-1. Go to Settings > See all settings
-2. Click "Forwarding and POP/IMAP" tab
-3. Click "Add a forwarding address"
-4. Enter your receiving email address
-5. Confirm the forwarding via the verification email
-6. Select "Forward a copy of incoming mail to..."
-7. Save changes
+1. Settings > See all settings > "Forwarding and POP/IMAP"
+2. Click "Add a forwarding address"
+3. Enter your receiving email (the one this script will monitor)
+4. Confirm via the verification email
+5. Select "Forward a copy of incoming mail to..."
 
-### Step 5: Create a Discord Webhook
+### 2. Create Discord Webhook(s)
 
-1. Open Discord and go to your server
-2. Right-click the channel where you want notifications
-3. Click "Edit Channel" > "Integrations" > "Webhooks"
-4. Click "New Webhook"
-5. Name it (e.g., "Email Forwarder")
-6. Click "Copy Webhook URL"
+1. Right-click your Discord channel > Edit Channel > Integrations > Webhooks
+2. Click "New Webhook" and copy the URL
+3. Create multiple webhooks if you want different services in different channels
 
-### Step 6: Configure the Script
+### 3. Set Up the Receiving Email
 
-1. Copy the example config:
-   ```bash
-   copy config.example.json config.json
-   ```
+For Gmail as the receiving account:
+1. Enable IMAP: Settings > See all settings > "Forwarding and POP/IMAP" > Enable IMAP
+2. Create an App Password:
+   - Google Account > Security > 2-Step Verification (enable if needed)
+   - Security > App passwords > Select "Mail" > Generate
+   - Save the 16-character password
 
-2. Edit `config.json` with your settings:
-   ```json
-   {
-       "imap_server": "imap.gmail.com",
-       "imap_port": 993,
-       "email_address": "your-receiving-email@gmail.com",
-       "email_password": "your-16-char-app-password",
-       "discord_webhook": "https://discord.com/api/webhooks/...",
-       "folder": "INBOX",
-       "search_criteria": "UNSEEN",
-       "mark_as_read": true,
-       "poll_interval": 60,
-       "subject_filter": "Your Netflix temporary access code"
-   }
-   ```
+### 4. Configure the Script
 
-### Step 7: Install Python and Dependencies
+Copy and edit the config:
+```cmd
+copy config.example.json config.json
+```
+
+Edit `config.json`:
+```json
+{
+    "imap_server": "imap.gmail.com",
+    "imap_port": 993,
+    "email_address": "your-email@gmail.com",
+    "email_password": "your-16-char-app-password",
+    "folder": "INBOX",
+    "search_criteria": "UNSEEN",
+    "mark_as_read": true,
+    "poll_interval": 60,
+
+    "discord_webhook": "https://discord.com/api/webhooks/DEFAULT_WEBHOOK",
+
+    "subject_filters": ["netflix", "hbo", "disney", "access code"],
+
+    "templates": {
+        "netflix": {
+            "subject_contains": "netflix",
+            "emoji": "🎬",
+            "title": "Netflix Access Code Requested",
+            "color": 14423100,
+            "webhook": "https://discord.com/api/webhooks/NETFLIX_CHANNEL",
+            "link_patterns": [
+                "<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>\\s*Get\\s*Code"
+            ],
+            "info_pattern": "Requested by\\s+(\\w+)\\s+from\\s+(?:a\\s+)?(.+?)\\s+at\\s+(.+?)(?:\\n|Get Code)"
+        },
+        "hbo": {
+            "subject_contains": "hbo",
+            "emoji": "📺",
+            "title": "HBO Max Code Requested",
+            "color": 9932887
+        }
+    }
+}
+```
+
+### 5. Install Python & Dependencies
 
 1. Install Python 3.8+ from [python.org](https://www.python.org/downloads/)
-2. Install dependencies:
-   ```bash
+2. Install requests:
+   ```cmd
    pip install -r requirements.txt
    ```
 
-### Step 8: Run the Script
+### 6. Test the Script
 
-```bash
+```cmd
+cd C:\forward
 python email_to_discord.py
 ```
 
-## Running as a Windows Service
+If it connects successfully, you'll see:
+```
+INFO - Starting Email to Discord Forwarder
+INFO - Connected to imap.gmail.com
+```
 
-To keep the script running in the background on your Windows server:
+Press `Ctrl+C` to stop.
 
-### Option A: Task Scheduler (Simple)
+## Running as a Windows Service (NSSM)
 
-1. Open Task Scheduler
-2. Click "Create Basic Task"
-3. Name: "Email to Discord Forwarder"
-4. Trigger: "When the computer starts"
-5. Action: "Start a program"
-6. Program: `pythonw.exe` (for no console window)
-7. Arguments: `C:\path\to\email_to_discord.py`
-8. Start in: `C:\path\to\` (directory containing the script)
+To run automatically on startup:
 
-### Option B: NSSM (Recommended for Services)
+### Install NSSM
 
-1. Download NSSM from [nssm.cc](https://nssm.cc/download)
-2. Open Command Prompt as Administrator
-3. Run:
-   ```bash
-   nssm install EmailToDiscord
-   ```
-4. Configure:
-   - Path: `C:\Python311\python.exe`
-   - Startup directory: `C:\path\to\forward`
-   - Arguments: `email_to_discord.py`
-5. Start the service:
-   ```bash
-   nssm start EmailToDiscord
-   ```
+1. Download from [nssm.cc](https://nssm.cc/download)
+2. Extract to a folder (e.g., `C:\Users\YourName\Downloads\nssm-2.24\win64\`)
 
-## Configuration Options
+### Create the Service
+
+Open Command Prompt **as Administrator**:
+
+```cmd
+"C:\Users\YourName\Downloads\nssm-2.24\nssm-2.24\win64\nssm.exe" install EmailToDiscord
+```
+
+In the GUI that opens:
+- **Path**: Your Python path (run `where python` to find it)
+  - Example: `C:\Users\YourName\AppData\Local\Programs\Python\Python311\python.exe`
+- **Startup directory**: `C:\forward`
+- **Arguments**: `email_to_discord.py`
+
+Click "Install service".
+
+### Manage the Service
+
+```cmd
+# Start
+"C:\path\to\nssm.exe" start EmailToDiscord
+
+# Check status
+"C:\path\to\nssm.exe" status EmailToDiscord
+
+# Stop
+"C:\path\to\nssm.exe" stop EmailToDiscord
+
+# Restart (after config changes)
+"C:\path\to\nssm.exe" restart EmailToDiscord
+
+# View/edit settings
+"C:\path\to\nssm.exe" edit EmailToDiscord
+
+# Remove service
+"C:\path\to\nssm.exe" remove EmailToDiscord confirm
+```
+
+### Verify Auto-Start
+
+1. Press `Win + R`, type `services.msc`
+2. Find "EmailToDiscord"
+3. Ensure "Startup type" is **Automatic**
+
+## Template System
+
+Templates let you customize how different email types are displayed.
+
+### Template Options
+
+| Option | Description |
+|--------|-------------|
+| `subject_contains` | Text to match in email subject (case-insensitive) |
+| `emoji` | Emoji for the Discord title |
+| `title` | Discord embed title |
+| `color` | Embed color (decimal) |
+| `webhook` | Override webhook for this template (optional) |
+| `link_patterns` | Regex patterns to extract links from HTML |
+| `info_pattern` | Regex to extract requester info (name, device, time) |
+
+### How Matching Works
+
+| Scenario | Result |
+|----------|--------|
+| Email matches template | Uses template formatting + webhook |
+| Email matches filter but no template | Shows raw email content |
+| Email doesn't match any filter | Skipped |
+
+### Multiple Webhooks
+
+Send different services to different Discord channels:
+
+```json
+{
+    "discord_webhook": "https://discord.com/api/webhooks/DEFAULT",
+
+    "templates": {
+        "netflix": {
+            "webhook": "https://discord.com/api/webhooks/NETFLIX_CHANNEL",
+            ...
+        },
+        "hbo": {
+            "webhook": "https://discord.com/api/webhooks/HBO_CHANNEL",
+            ...
+        },
+        "disney": {
+            ...  // Uses default webhook (no override)
+        }
+    }
+}
+```
+
+## Configuration Reference
 
 | Option | Description | Default |
 |--------|-------------|---------|
 | `imap_server` | IMAP server hostname | Required |
 | `imap_port` | IMAP server port | 993 |
-| `email_address` | Email address to monitor | Required |
-| `email_password` | Email password or app password | Required |
-| `discord_webhook` | Discord webhook URL | Required |
-| `folder` | Email folder to monitor | INBOX |
-| `search_criteria` | IMAP search criteria | UNSEEN |
-| `mark_as_read` | Mark emails as read after processing | true |
-| `poll_interval` | Seconds between inbox checks | 60 |
-| `subject_filter` | Only forward emails containing this text in subject (case-insensitive) | None (all emails) |
+| `email_address` | Email to monitor | Required |
+| `email_password` | App password | Required |
+| `discord_webhook` | Default webhook URL | Required |
+| `folder` | Email folder | INBOX |
+| `search_criteria` | IMAP search | UNSEEN |
+| `mark_as_read` | Mark processed emails as read | true |
+| `poll_interval` | Seconds between checks | 60 |
+| `subject_filters` | Array of keywords to match | [] |
+| `subject_filter` | Single keyword (legacy) | null |
+| `templates` | Service-specific formatting | {} |
 
 ## Troubleshooting
 
+### "ModuleNotFoundError: No module named 'requests'"
+
+You have multiple Python versions. Install for the correct one:
+```cmd
+"C:\path\to\python.exe" -m pip install requests
+```
+
+Use the same Python path that NSSM is configured to use.
+
 ### "Authentication failed"
-- For Gmail: Make sure you're using an App Password, not your regular password
-- Ensure 2-Step Verification is enabled on your Google account
 
-### "Connection refused"
-- Check that IMAP is enabled in your email settings
-- Verify the IMAP server and port are correct
+- Use an App Password, not your regular Gmail password
+- Make sure 2-Step Verification is enabled
 
-### Emails not being forwarded
-- Check Gmail's forwarding settings
-- Verify the forwarding address is confirmed
-- Check the spam folder of the receiving account
+### Service stuck in PAUSED state
 
-### Discord messages not appearing
-- Verify the webhook URL is correct
-- Check that the webhook hasn't been deleted
-- Look for errors in `email_forwarder.log`
+```cmd
+nssm stop EmailToDiscord
+nssm remove EmailToDiscord confirm
+```
+Then reinstall the service.
+
+### Check service logs
+
+Set up logging in NSSM:
+1. Run `nssm edit EmailToDiscord`
+2. Go to "I/O" tab
+3. Set stdout and stderr to log files:
+   - `C:\forward\service_output.log`
+   - `C:\forward\service_error.log`
+
+### Emails not forwarding
+
+- Check `email_forwarder.log` in the script directory
+- Verify Gmail forwarding is set up and confirmed
+- Check spam folder of receiving account
 
 ## Files
 
-- `email_to_discord.py` - Main script
-- `config.json` - Your configuration (create from example)
-- `config.example.json` - Example configuration template
-- `processed_emails.json` - Tracks processed emails (auto-created)
-- `email_forwarder.log` - Log file (auto-created)
-- `requirements.txt` - Python dependencies
-
-## License
-
-MIT License - Feel free to modify and use as needed.
+| File | Description |
+|------|-------------|
+| `email_to_discord.py` | Main script |
+| `config.json` | Your configuration |
+| `config.example.json` | Example template |
+| `requirements.txt` | Python dependencies |
+| `processed_emails.json` | Tracks processed emails (auto-created) |
+| `email_forwarder.log` | Log file (auto-created) |
