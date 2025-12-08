@@ -1,4 +1,4 @@
-# Email to Discord Forwarder
+# Email Code to Discord Forwarder
 
 A Python script that monitors an email inbox and forwards Netflix emails to a Discord channel via webhook.
 
