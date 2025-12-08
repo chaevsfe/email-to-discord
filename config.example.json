@@ -3,11 +3,12 @@
     "imap_port": 993,
     "email_address": "your-receiving-email@gmail.com",
     "email_password": "your-app-password",
-    "discord_webhook": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
     "folder": "INBOX",
     "search_criteria": "UNSEEN",
     "mark_as_read": true,
     "poll_interval": 60,
+
+    "discord_webhook": "https://discord.com/api/webhooks/DEFAULT_WEBHOOK",
 
     "subject_filters": ["netflix", "hbo", "disney", "access code", "verification"],
 
@@ -17,6 +18,7 @@
             "emoji": "🎬",
             "title": "Netflix Access Code Requested",
             "color": 14423100,
+            "webhook": "https://discord.com/api/webhooks/NETFLIX_CHANNEL_WEBHOOK",
             "link_patterns": [
                 "<a[^>]+href=[\"']([^\"']*netflix[^\"']*)[\"'][^>]*>\\s*Get Code",
                 "<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>\\s*Get\\s*Code\\s*</a>"
@@ -27,7 +29,8 @@
             "subject_contains": "hbo",
             "emoji": "📺",
             "title": "HBO Max Code Requested",
-            "color": 9932887
+            "color": 9932887,
+            "webhook": "https://discord.com/api/webhooks/HBO_CHANNEL_WEBHOOK"
         },
         "disney": {
             "subject_contains": "disney",
