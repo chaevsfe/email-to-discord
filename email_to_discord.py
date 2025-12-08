@@ -147,6 +147,16 @@ def truncate_text(text: str, max_length: int = 1900) -> str:
         return text
     return text[:max_length] + "...\n\n[Message truncated]"
 
+def parse_email_date(date_str: str) -> str:
+    """Parse email date string to ISO format for Discord."""
+    from email.utils import parsedate_to_datetime
+    try:
+        dt = parsedate_to_datetime(date_str)
+        return dt.isoformat()
+    except (ValueError, TypeError):
+        # If parsing fails, return current time
+        return datetime.now().isoformat()
+
 def find_matching_template(subject: str, templates: dict) -> tuple:
     """Find a template that matches the email subject."""
     subject_lower = subject.lower()
@@ -214,6 +224,9 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
     else:
         webhooks = [default_webhook]
 
+    # Parse email timestamp for Discord
+    email_timestamp = parse_email_date(timestamp)
+
     if template:
         # Use template-based formatting
         template_info = extract_template_info(body, html, template)
@@ -238,7 +251,7 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
                 "footer": {
                     "text": f"{template_name.title()} Code • Expires in 15 minutes"
                 },
-                "timestamp": datetime.now().isoformat()
+                "timestamp": email_timestamp
             }
         else:
             # No code - use standard template formatting
@@ -277,7 +290,7 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
                 "footer": {
                     "text": f"{template_name.title()} Access Code"
                 },
-                "timestamp": datetime.now().isoformat()
+                "timestamp": email_timestamp
             }
     else:
         # Fallback: Standard email formatting (raw email)
@@ -304,7 +317,7 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
             "footer": {
                 "text": "Email Forwarder"
             },
-            "timestamp": datetime.now().isoformat()
+            "timestamp": email_timestamp
         }
 
     payload = {
