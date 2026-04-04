@@ -19,16 +19,19 @@ import time
 import os
 import sys
 import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from pathlib import Path
+import socket
+import tempfile
 import requests
 
-# Configure logging
+# Configure logging with rotation (5 MB max, keep 3 backups)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('email_forwarder.log'),
+        RotatingFileHandler('email_forwarder.log', maxBytes=5*1024*1024, backupCount=3),
         logging.StreamHandler()
     ]
 )
@@ -62,11 +65,22 @@ def load_processed_emails() -> set:
     return set()
 
 def save_processed_emails(processed_ids: set):
-    """Save the set of processed email IDs."""
+    """Save the set of processed email IDs. Uses atomic write to prevent corruption on power loss."""
     # Keep only the last 1000 IDs to prevent file from growing too large
     ids_list = list(processed_ids)[-1000:]
-    with open(PROCESSED_FILE, 'w') as f:
-        json.dump({'processed_ids': ids_list, 'last_updated': datetime.now().isoformat()}, f)
+    dir_path = os.path.dirname(os.path.abspath(PROCESSED_FILE))
+    try:
+        with tempfile.NamedTemporaryFile('w', dir=dir_path, suffix='.tmp', delete=False) as tmp:
+            json.dump({'processed_ids': ids_list, 'last_updated': datetime.now().isoformat()}, tmp)
+            tmp_path = tmp.name
+        os.replace(tmp_path, PROCESSED_FILE)
+    except OSError as e:
+        logger.error(f"Failed to save processed emails: {e}")
+        # Clean up temp file if rename failed
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 def decode_mime_header(header: str) -> str:
     """Decode a MIME-encoded email header."""
@@ -334,6 +348,11 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
         for attempt in range(retries):
             try:
                 response = requests.post(webhook_url, json=payload, timeout=10)
+                if response.status_code == 429:
+                    retry_after = response.json().get('retry_after', delay)
+                    logger.warning(f"Discord rate limited, waiting {retry_after}s")
+                    time.sleep(retry_after)
+                    continue
                 response.raise_for_status()
                 logger.info(f"Successfully sent to webhook: {webhook_url[:50]}...")
                 webhook_success = True
@@ -355,11 +374,12 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
 def connect_to_imap(config: dict) -> imaplib.IMAP4_SSL:
     """Connect to the IMAP server."""
     try:
-        mail = imaplib.IMAP4_SSL(config['imap_server'], config.get('imap_port', 993))
+        timeout = config.get('imap_timeout', 60)
+        mail = imaplib.IMAP4_SSL(config['imap_server'], config.get('imap_port', 993), timeout=timeout)
         mail.login(config['email_address'], config['email_password'])
         logger.info(f"Connected to {config['imap_server']}")
         return mail
-    except imaplib.IMAP4.error as e:
+    except (imaplib.IMAP4.error, socket.timeout, OSError) as e:
         logger.error(f"IMAP connection failed: {e}")
         raise
 
@@ -370,9 +390,9 @@ def check_for_new_emails(mail: imaplib.IMAP4_SSL, config: dict, processed_ids: s
         folder = config.get('folder', 'INBOX')
         mail.select(folder)
 
-        # Search for unread emails
+        # Search for unread emails using UIDs (stable across session/mailbox changes)
         search_criteria = config.get('search_criteria', 'UNSEEN')
-        status, messages = mail.search(None, search_criteria)
+        status, messages = mail.uid('search', None, search_criteria)
 
         if status != 'OK':
             logger.warning("Failed to search emails")
@@ -386,16 +406,16 @@ def check_for_new_emails(mail: imaplib.IMAP4_SSL, config: dict, processed_ids: s
 
         logger.info(f"Found {len(email_ids)} email(s) matching criteria")
 
-        for email_id in email_ids:
-            email_id_str = email_id.decode()
+        for email_uid in email_ids:
+            uid_str = email_uid.decode()
 
             # Skip if already processed
-            if email_id_str in processed_ids:
+            if uid_str in processed_ids:
                 continue
 
             try:
-                # Fetch the email
-                status, msg_data = mail.fetch(email_id, '(RFC822)')
+                # Fetch the email by UID
+                status, msg_data = mail.uid('fetch', email_uid, '(RFC822)')
 
                 if status != 'OK':
                     continue
@@ -426,9 +446,9 @@ def check_for_new_emails(mail: imaplib.IMAP4_SSL, config: dict, processed_ids: s
                     matches = any(f.lower() in subject_lower for f in subject_filters)
                     if not matches:
                         logger.debug(f"Skipping email - subject doesn't match filters: {subject}")
-                        processed_ids.add(email_id_str)
+                        processed_ids.add(uid_str)
                         if config.get('mark_as_read', True):
-                            mail.store(email_id, '+FLAGS', '\\Seen')
+                            mail.uid('store', email_uid, '+FLAGS', '\\Seen')
                         continue
 
                 # Get templates from config
@@ -436,17 +456,17 @@ def check_for_new_emails(mail: imaplib.IMAP4_SSL, config: dict, processed_ids: s
 
                 # Send to Discord
                 if send_to_discord(config['discord_webhook'], subject, sender, body, html, date, templates):
-                    processed_ids.add(email_id_str)
+                    processed_ids.add(uid_str)
 
                     # Mark as read if configured
                     if config.get('mark_as_read', True):
-                        mail.store(email_id, '+FLAGS', '\\Seen')
+                        mail.uid('store', email_uid, '+FLAGS', '\\Seen')
 
                 # Small delay between emails to avoid rate limiting
                 time.sleep(1)
 
             except Exception as e:
-                logger.error(f"Error processing email {email_id_str}: {e}")
+                logger.error(f"Error processing email UID {uid_str}: {e}")
 
         return processed_ids
 
