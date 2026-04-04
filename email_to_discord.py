@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 
 # Path to track processed emails
 PROCESSED_FILE = 'processed_emails.json'
+# Path to track recent Discord message IDs for editing
+RECENT_MESSAGES_FILE = 'recent_messages.json'
 
 def load_config(config_path: str = 'config.json') -> dict:
     """Load configuration from JSON file."""
@@ -77,6 +79,33 @@ def save_processed_emails(processed_ids: set):
     except OSError as e:
         logger.error(f"Failed to save processed emails: {e}")
         # Clean up temp file if rename failed
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+def load_recent_messages() -> dict:
+    """Load recent Discord message IDs keyed by template name.
+    Each entry: {template_name: {"webhook": url, "message_id": id, "timestamp": iso}}
+    """
+    if os.path.exists(RECENT_MESSAGES_FILE):
+        try:
+            with open(RECENT_MESSAGES_FILE, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return {}
+    return {}
+
+def save_recent_messages(recent_messages: dict):
+    """Save recent Discord message IDs. Uses atomic write."""
+    dir_path = os.path.dirname(os.path.abspath(RECENT_MESSAGES_FILE))
+    try:
+        with tempfile.NamedTemporaryFile('w', dir=dir_path, suffix='.tmp', delete=False) as tmp:
+            json.dump(recent_messages, tmp)
+            tmp_path = tmp.name
+        os.replace(tmp_path, RECENT_MESSAGES_FILE)
+    except OSError as e:
+        logger.error(f"Failed to save recent messages: {e}")
         try:
             os.unlink(tmp_path)
         except OSError:
@@ -200,13 +229,18 @@ def extract_template_info(body: str, html: str, template: dict) -> dict:
     if info_pattern:
         match = re.search(info_pattern, body, re.IGNORECASE)
         if match:
-            groups = match.groups()
-            if len(groups) >= 1:
-                info['name'] = groups[0]
-            if len(groups) >= 2:
-                info['device'] = groups[1].strip() if groups[1] else None
-            if len(groups) >= 3:
-                info['time'] = groups[2].strip() if groups[2] else None
+            # Map named groups first, fall back to positional
+            groupdict = match.groupdict()
+            if groupdict:
+                info.update({k: v.strip() for k, v in groupdict.items() if v})
+            else:
+                groups = match.groups()
+                if len(groups) >= 1:
+                    info['name'] = groups[0]
+                if len(groups) >= 2:
+                    info['device'] = groups[1].strip() if groups[1] else None
+                if len(groups) >= 3:
+                    info['time'] = groups[2].strip() if groups[2] else None
 
     # Extract link using link_patterns if defined
     link_patterns = template.get('link_patterns', [])
@@ -222,7 +256,24 @@ def extract_template_info(body: str, html: str, template: dict) -> dict:
 
     return info
 
-def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, html: str, timestamp: str, templates: dict):
+def edit_discord_message(webhook_url: str, message_id: str, embed: dict) -> bool:
+    """Edit an existing Discord webhook message."""
+    edit_url = f"{webhook_url}/messages/{message_id}"
+    try:
+        response = requests.patch(edit_url, json={"embeds": [embed]}, timeout=10)
+        if response.status_code == 429:
+            retry_after = response.json().get('retry_after', 2)
+            logger.warning(f"Discord rate limited on edit, waiting {retry_after}s")
+            time.sleep(retry_after)
+            response = requests.patch(edit_url, json={"embeds": [embed]}, timeout=10)
+        response.raise_for_status()
+        logger.info(f"Successfully edited Discord message {message_id}")
+        return True
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Failed to edit Discord message {message_id}: {e}")
+        return False
+
+def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, html: str, timestamp: str, templates: dict, recent_messages: dict):
     """Send an email notification to Discord via webhook."""
 
     # Try to find a matching template
@@ -240,6 +291,101 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
 
     # Parse email timestamp for Discord
     email_timestamp = parse_email_date(timestamp)
+
+    # Check if this template should edit a previous message instead of sending new
+    edit_targets = template.get('edit_template') if template else None
+    if edit_targets:
+        if isinstance(edit_targets, str):
+            edit_targets = [edit_targets]
+        # Find the most recent matching message
+        best_target = None
+        best_time = None
+        for target in edit_targets:
+            if target in recent_messages:
+                ts = recent_messages[target].get('timestamp', '')
+                if best_time is None or ts > best_time:
+                    best_time = ts
+                    best_target = target
+
+    if edit_targets:
+        template_info = extract_template_info(body, html, template)
+
+        # Build the sign-in detail line (used for both edit and standalone)
+        parts = []
+        if template_info.get('device'):
+            parts.append(template_info['device'])
+        if template_info.get('location'):
+            parts.append(template_info['location'])
+        if template_info.get('time'):
+            parts.append(template_info['time'])
+        signin_summary = " • ".join(parts) if parts else "See email for details"
+        field_name = template.get('edit_field_name', '✅ Signed In')
+        edit_color = template.get('edit_color', 3066993)
+
+        if best_target:
+            prev = recent_messages[best_target]
+
+            # Fetch the original message to preserve its embed
+            try:
+                get_url = f"{prev['webhook']}/messages/{prev['message_id']}"
+                resp = requests.get(get_url, timeout=10)
+                resp.raise_for_status()
+                original_embed = resp.json()['embeds'][0]
+            except Exception as e:
+                logger.error(f"Failed to fetch original message for editing: {e}")
+                original_embed = None
+
+            if original_embed:
+                # Append a new field to the original embed
+                if 'fields' not in original_embed:
+                    original_embed['fields'] = []
+                original_embed['fields'].append({
+                    "name": field_name,
+                    "value": signin_summary,
+                    "inline": False
+                })
+
+                # Update the color to indicate sign-in happened
+                original_embed['color'] = edit_color
+
+                success = edit_discord_message(prev['webhook'], prev['message_id'], original_embed)
+                if success:
+                    logger.info(f"Edited previous '{best_target}' message with sign-in details")
+                    # Remove the entry so a duplicate new-device email won't edit again
+                    del recent_messages[best_target]
+                    save_recent_messages(recent_messages)
+                return success
+
+            logger.warning(f"Could not fetch original message, sending standalone instead")
+
+        # No code message to edit (or fetch failed) — send a clean standalone embed
+        embed = {
+            "title": f"{template.get('emoji', '📧')} {template.get('title', 'New Device Sign-In')}",
+            "color": edit_color,
+            "fields": [
+                {
+                    "name": field_name,
+                    "value": signin_summary,
+                    "inline": False
+                }
+            ],
+            "timestamp": parse_email_date(timestamp)
+        }
+        payload = {"embeds": [embed]}
+
+        for webhook_url in webhooks:
+            try:
+                response = requests.post(f"{webhook_url}?wait=true", json=payload, timeout=10)
+                if response.status_code == 429:
+                    retry_after = response.json().get('retry_after', 2)
+                    time.sleep(retry_after)
+                    response = requests.post(f"{webhook_url}?wait=true", json=payload, timeout=10)
+                response.raise_for_status()
+                logger.info(f"Sent standalone sign-in notification")
+                return True
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Failed to send standalone sign-in notification: {e}")
+        return False
 
     if template:
         # Use template-based formatting
@@ -292,7 +438,7 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
             # Build description with link if found
             description = "Someone requested a temporary access code."
             if template_info.get('link'):
-                description += f"\n\n**[Click here to Get Code]({template_info['link']})**\n\n⚠️ Link expires in 15 minutes"
+                description += f"\n\n**[Click here to Get Code]({template_info['link']})**"
             else:
                 description += " Check your email to approve."
 
@@ -300,9 +446,9 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
                 "title": f"{emoji} {title}",
                 "description": description,
                 "color": color,
-                "fields": fields if fields else [{"name": "Info", "value": "Check email for details", "inline": False}],
+                "fields": fields,
                 "footer": {
-                    "text": f"{template_name.title()} Access Code"
+                    "text": f"{template_name.title()} Code • Expires in 15 minutes"
                 },
                 "timestamp": email_timestamp
             }
@@ -340,14 +486,15 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
 
     # Send to all webhooks with retry logic
     success = False
+    sent_message_id = None
     for webhook_url in webhooks:
-        webhook_success = False
         retries = 3
         delay = 2  # Start with 2 second delay
 
         for attempt in range(retries):
             try:
-                response = requests.post(webhook_url, json=payload, timeout=10)
+                # Use ?wait=true to get the message ID back
+                response = requests.post(f"{webhook_url}?wait=true", json=payload, timeout=10)
                 if response.status_code == 429:
                     retry_after = response.json().get('retry_after', delay)
                     logger.warning(f"Discord rate limited, waiting {retry_after}s")
@@ -355,7 +502,18 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
                     continue
                 response.raise_for_status()
                 logger.info(f"Successfully sent to webhook: {webhook_url[:50]}...")
-                webhook_success = True
+
+                # Store message ID for potential future edits
+                resp_data = response.json()
+                if resp_data.get('id') and template_name:
+                    sent_message_id = resp_data['id']
+                    recent_messages[template_name] = {
+                        "webhook": webhook_url,
+                        "message_id": sent_message_id,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    save_recent_messages(recent_messages)
+
                 success = True
                 break
             except requests.exceptions.RequestException as e:
@@ -383,7 +541,7 @@ def connect_to_imap(config: dict) -> imaplib.IMAP4_SSL:
         logger.error(f"IMAP connection failed: {e}")
         raise
 
-def check_for_new_emails(mail: imaplib.IMAP4_SSL, config: dict, processed_ids: set) -> set:
+def check_for_new_emails(mail: imaplib.IMAP4_SSL, config: dict, processed_ids: set, recent_messages: dict) -> set:
     """Check for new emails and forward them to Discord."""
     try:
         # Select the inbox (or configured folder)
@@ -455,7 +613,7 @@ def check_for_new_emails(mail: imaplib.IMAP4_SSL, config: dict, processed_ids: s
                 templates = config.get('templates', {})
 
                 # Send to Discord
-                if send_to_discord(config['discord_webhook'], subject, sender, body, html, date, templates):
+                if send_to_discord(config['discord_webhook'], subject, sender, body, html, date, templates, recent_messages):
                     processed_ids.add(uid_str)
 
                     # Mark as read if configured
@@ -492,6 +650,9 @@ def main():
     processed_ids = load_processed_emails()
     logger.info(f"Loaded {len(processed_ids)} previously processed email IDs")
 
+    # Load recent Discord message IDs for editing
+    recent_messages = load_recent_messages()
+
     # Polling interval (in seconds)
     poll_interval = config.get('poll_interval', 60)
 
@@ -506,7 +667,7 @@ def main():
                 mail = connect_to_imap(config)
 
             # Check for new emails
-            processed_ids = check_for_new_emails(mail, config, processed_ids)
+            processed_ids = check_for_new_emails(mail, config, processed_ids, recent_messages)
 
             # Save processed IDs
             save_processed_emails(processed_ids)
