@@ -324,18 +324,22 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
 
         if best_target:
             prev = recent_messages[best_target]
+            prev_messages = prev.get('messages', [])
+            # Support old format (single webhook/message_id)
+            if not prev_messages and prev.get('webhook'):
+                prev_messages = [{"webhook": prev['webhook'], "message_id": prev['message_id']}]
 
-            # Fetch the original message to preserve its embed
-            try:
-                get_url = f"{prev['webhook']}/messages/{prev['message_id']}"
-                resp = requests.get(get_url, timeout=10)
-                resp.raise_for_status()
-                original_embed = resp.json()['embeds'][0]
-            except Exception as e:
-                logger.error(f"Failed to fetch original message for editing: {e}")
-                original_embed = None
+            any_edited = False
+            for msg in prev_messages:
+                try:
+                    get_url = f"{msg['webhook']}/messages/{msg['message_id']}"
+                    resp = requests.get(get_url, timeout=10)
+                    resp.raise_for_status()
+                    original_embed = resp.json()['embeds'][0]
+                except Exception as e:
+                    logger.error(f"Failed to fetch message {msg['message_id']}: {e}")
+                    continue
 
-            if original_embed:
                 # Append a new field to the original embed
                 if 'fields' not in original_embed:
                     original_embed['fields'] = []
@@ -344,19 +348,18 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
                     "value": signin_summary,
                     "inline": False
                 })
-
-                # Update the color to indicate sign-in happened
                 original_embed['color'] = edit_color
 
-                success = edit_discord_message(prev['webhook'], prev['message_id'], original_embed)
-                if success:
-                    logger.info(f"Edited previous '{best_target}' message with sign-in details")
-                    # Remove the entry so a duplicate new-device email won't edit again
-                    del recent_messages[best_target]
-                    save_recent_messages(recent_messages)
-                return success
+                if edit_discord_message(msg['webhook'], msg['message_id'], original_embed):
+                    any_edited = True
 
-            logger.warning(f"Could not fetch original message, sending standalone instead")
+            if any_edited:
+                logger.info(f"Edited previous '{best_target}' message(s) with sign-in details")
+                del recent_messages[best_target]
+                save_recent_messages(recent_messages)
+                return True
+
+            logger.warning(f"Could not edit any previous messages, sending standalone instead")
 
         # No code message to edit (or fetch failed) — send a clean standalone embed
         embed = {
@@ -486,7 +489,7 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
 
     # Send to all webhooks with retry logic
     success = False
-    sent_message_id = None
+    sent_messages = []
     for webhook_url in webhooks:
         retries = 3
         delay = 2  # Start with 2 second delay
@@ -503,16 +506,13 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
                 response.raise_for_status()
                 logger.info(f"Successfully sent to webhook: {webhook_url[:50]}...")
 
-                # Store message ID for potential future edits
+                # Collect message ID for potential future edits
                 resp_data = response.json()
-                if resp_data.get('id') and template_name:
-                    sent_message_id = resp_data['id']
-                    recent_messages[template_name] = {
+                if resp_data.get('id'):
+                    sent_messages.append({
                         "webhook": webhook_url,
-                        "message_id": sent_message_id,
-                        "timestamp": datetime.now().isoformat()
-                    }
-                    save_recent_messages(recent_messages)
+                        "message_id": resp_data['id']
+                    })
 
                 success = True
                 break
@@ -526,6 +526,13 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
 
     if success:
         logger.info(f"Email forwarded to Discord: {subject}")
+        # Store all message IDs for potential future edits
+        if sent_messages and template_name:
+            recent_messages[template_name] = {
+                "messages": sent_messages,
+                "timestamp": datetime.now().isoformat()
+            }
+            save_recent_messages(recent_messages)
 
     return success
 
