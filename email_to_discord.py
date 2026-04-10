@@ -273,8 +273,14 @@ def edit_discord_message(webhook_url: str, message_id: str, embed: dict) -> bool
         logger.error(f"Failed to edit Discord message {message_id}: {e}")
         return False
 
-def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, html: str, timestamp: str, templates: dict, recent_messages: dict):
+def send_to_discord(default_webhook, subject: str, sender: str, body: str, html: str, timestamp: str, templates: dict, recent_messages: dict):
     """Send an email notification to Discord via webhook."""
+
+    # Normalize default webhook(s) to a list
+    if isinstance(default_webhook, str):
+        default_webhooks = [default_webhook]
+    else:
+        default_webhooks = list(default_webhook)
 
     # Try to find a matching template
     template_name, template = find_matching_template(subject, templates)
@@ -283,11 +289,10 @@ def send_to_discord(default_webhook: str, subject: str, sender: str, body: str, 
     if template:
         webhooks = template.get('webhooks', [])
         if not webhooks:
-            # Fall back to single webhook
-            single_webhook = template.get('webhook', default_webhook)
-            webhooks = [single_webhook]
+            single_webhook = template.get('webhook')
+            webhooks = [single_webhook] if single_webhook else default_webhooks
     else:
-        webhooks = [default_webhook]
+        webhooks = default_webhooks
 
     # Parse email timestamp for Discord
     email_timestamp = parse_email_date(timestamp)
