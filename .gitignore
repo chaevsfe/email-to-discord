@@ -1,0 +1,15 @@
+# Live config holds the IMAP app password and webhook URLs — never commit it.
+# Copy config.example.json to config.json and fill it in on the host.
+config.json
+
+# Runtime state (auto-created)
+processed_emails.json
+recent_messages.json
+email_forwarder.log
+email_forwarder.log.*
+service_output.log
+service_error.log
+
+__pycache__/
+*.py[cod]
+.DS_Store

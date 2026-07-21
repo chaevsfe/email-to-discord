@@ -68,7 +68,7 @@ Edit `config.json`:
             "link_patterns": [
                 "<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>\\s*Get\\s*Code"
             ],
-            "info_pattern": "Requested by\\s+(\\w+)\\s+from\\s+(?:a\\s+)?(.+?)\\s+at\\s+(.+?)(?:\\n|Get Code)"
+            "info_pattern": "Requested by\\s+(?P<name>.+?)\\s+from\\s+(?:an?\\s+)?(?P<device>.+?)\\s+at\\s+(?P<time>[^\\r\\n]+)"
         },
         "hbo": {
             "subject_contains": "hbo",
@@ -164,22 +164,46 @@ Templates let you customize how different email types are displayed.
 
 | Option | Description |
 |--------|-------------|
-| `subject_contains` | Text to match in email subject (case-insensitive) |
+| `subject_contains` | Text to match in email subject (case-insensitive). **Required** — a template without it matches every email |
 | `emoji` | Emoji for the Discord title |
 | `title` | Discord embed title |
 | `color` | Embed color (decimal) |
 | `webhook` | Single webhook URL for this template (optional) |
 | `webhooks` | Array of webhook URLs to send to multiple servers (optional) |
 | `link_patterns` | Regex patterns to extract links from HTML |
-| `info_pattern` | Regex to extract requester info (name, device, time) |
+| `info_pattern` | Regex to extract requester info. Named groups `name`, `device`, `location`, `time` are matched against the plain-text body **and** the HTML rendered to text |
+| `code_pattern` | Regex whose first group is a login code. When it matches, the code is shown in its own `Your Code` block |
+| `info_field_name` | Label for the requester line (default `📱 Requested By`) |
+| `display_name` | Name used in the footer (default: the template key with underscores replaced) |
+| `footer_text` | Overrides the whole footer line |
+| `edit_template` | Template name, or list of names, whose last message this one should **edit** instead of posting |
+| `edit_field_name` | Label for the appended field (default `✅ Signed In`) |
+| `edit_color` | Colour the edited embed becomes (default green) |
+| `edit_window_minutes` | How recent the target message must be (default 15) |
 
 ### How Matching Works
 
 | Scenario | Result |
 |----------|--------|
+| Email matches a template with `edit_template` | Appends a field to that template's last message, if it is newer than `edit_window_minutes` |
+| ...and no recent message exists | Posts its own standalone embed instead |
 | Email matches template | Uses template formatting + webhook |
 | Email matches filter but no template | Shows raw email content |
-| Email doesn't match any filter | Skipped |
+| Email doesn't match any filter | Marked read and skipped |
+
+### Correlating a Sign-In With a Code Request
+
+`netflix_new_device` sets `edit_template`, so a "new device" email finds the sign-in or
+access code message that preceded it and appends `✅ Signed In` to it — one Discord
+message tells the whole story of one sign-in.
+
+The match is made **on time alone**, within `edit_window_minutes`. Device names are not
+comparable between the two emails: an access request from a `Samsung Galaxy S25 Edge`
+produces a sign-in alert naming `Android Phone Chrome - Mobile Browser`.
+
+15 minutes is the default because Netflix states that expiry in both code emails. If no
+code request falls inside the window, the sign-in posts as its own message rather than
+attaching itself to an unrelated one.
 
 ### Multiple Webhooks
 
@@ -219,10 +243,13 @@ If no `webhook` or `webhooks` is specified, the default `discord_webhook` is use
 ### Retry Logic
 
 When a webhook fails (network issues, Discord down, etc.):
-- Retries **3 times** with exponential backoff (2s, 4s, 8s delays)
+- Makes **3 attempts** per webhook, sleeping 2s then 4s between them
 - If all attempts fail, tries the next webhook in the list
 - If **all webhooks fail**, the email stays unread and will be retried on the next poll cycle
-- Emails are never lost - they remain in the inbox until successfully sent
+
+One caveat worth knowing: if there are several webhooks and *some* succeed, the email
+counts as delivered and is marked read. It is not re-sent to the channels that failed —
+those are logged as errors instead. Emails are only retried when **every** webhook failed.
 
 ## Configuration Reference
 
@@ -232,7 +259,8 @@ When a webhook fails (network issues, Discord down, etc.):
 | `imap_port` | IMAP server port | 993 |
 | `email_address` | Email to monitor | Required |
 | `email_password` | App password | Required |
-| `discord_webhook` | Default webhook URL | Required |
+| `discord_webhook` | Default webhook URL, or an array of URLs | Required |
+| `imap_timeout` | IMAP socket timeout in seconds | 60 |
 | `folder` | Email folder | INBOX |
 | `search_criteria` | IMAP search | UNSEEN |
 | `mark_as_read` | Mark processed emails as read | true |
@@ -285,8 +313,9 @@ Set up logging in NSSM:
 | File | Description |
 |------|-------------|
 | `email_to_discord.py` | Main script |
-| `config.json` | Your configuration |
-| `config.example.json` | Example template |
+| `config.json` | Your configuration — git-ignored, holds your live credentials |
+| `config.example.json` | Example template, safe to commit |
 | `requirements.txt` | Python dependencies |
 | `processed_emails.json` | Tracks processed emails (auto-created) |
+| `recent_messages.json` | Tracks recent message IDs so sign-ins can edit them (auto-created) |
 | `email_forwarder.log` | Log file (auto-created) |

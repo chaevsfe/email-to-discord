@@ -2,20 +2,18 @@
     "imap_server": "imap.gmail.com",
     "imap_port": 993,
     "email_address": "your-receiving-email@gmail.com",
-    "email_password": "your-app-password",
+    "email_password": "your-16-char-app-password",
     "folder": "INBOX",
     "search_criteria": "UNSEEN",
     "mark_as_read": true,
     "poll_interval": 60,
-
-    "discord_webhook": "https://discord.com/api/webhooks/DEFAULT_WEBHOOK",
+    "discord_webhook": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
     "subject_filters": [
-        "netflix",
-        "hbo",
-        "disney",
-        "verification",
-        "passcode",
-        "sign-in code"
+        "Your Netflix temporary access code",
+        "Your sign-in code",
+        "A new device is using your account",
+        "Time Sensitive: Your One-Time HBO Max Code",
+        "Your one-time passcode"
     ],
     "templates": {
         "netflix_access": {
@@ -26,7 +24,7 @@
             "link_patterns": [
                 "<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>\\s*Get\\s*Code"
             ],
-            "info_pattern": "Requested by\\s+(\\w+)\\s+from\\s+(?:a\\s+)?(.+?)\\s+at\\s+(.+?)(?:\n|Get Code)"
+            "info_pattern": "Requested by\\s+(?P<name>.+?)\\s+from\\s+(?:an?\\s+)?(?P<device>.+?)\\s+at\\s+(?P<time>[^\\r\\n]+)"
         },
         "netflix_signin": {
             "subject_contains": "Your sign-in code",
@@ -34,6 +32,20 @@
             "title": "Netflix Sign-In Code",
             "color": 14423100,
             "code_pattern": "Enter this code to sign in\\s+(\\d{4,6})"
+        },
+        "netflix_new_device": {
+            "subject_contains": "A new device is using your account",
+            "emoji": "🎬",
+            "title": "Netflix New Device Sign-In",
+            "color": 3066993,
+            "edit_template": [
+                "netflix_signin",
+                "netflix_access"
+            ],
+            "edit_field_name": "✅ Signed In",
+            "edit_color": 3066993,
+            "edit_window_minutes": 15,
+            "info_pattern": "Device\\s+(?P<device>[^\\n]+)\\s+Location\\s+(?P<location>[^\\n]+)[\\s\\S]*?Time\\s+(?P<time>[^\\n]+)"
         },
         "hbo": {
             "subject_contains": "Time Sensitive: Your One-Time HBO Max Code",
