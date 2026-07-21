@@ -17,10 +17,12 @@ from email.header import decode_header
 import json
 import time
 import os
+import re
 import sys
+import html as html_lib
 import logging
 from logging.handlers import RotatingFileHandler
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import socket
 import tempfile
@@ -41,6 +43,12 @@ logger = logging.getLogger(__name__)
 PROCESSED_FILE = 'processed_emails.json'
 # Path to track recent Discord message IDs for editing
 RECENT_MESSAGES_FILE = 'recent_messages.json'
+# How many processed UIDs to remember (oldest are dropped first)
+MAX_PROCESSED_IDS = 1000
+# How long a code message stays eligible to receive a "signed in" edit.
+# Netflix states 15 minutes in both code emails, and in the sample corpus genuine
+# pairs are <=10.7 min apart while unrelated sign-ins are >=2.6 days apart.
+DEFAULT_EDIT_WINDOW_MINUTES = 15
 
 def load_config(config_path: str = 'config.json') -> dict:
     """Load configuration from JSON file."""
@@ -55,34 +63,57 @@ def load_config(config_path: str = 'config.json') -> dict:
         logger.error(f"Invalid JSON in config file: {e}")
         sys.exit(1)
 
-def load_processed_emails() -> set:
-    """Load the set of already processed email IDs."""
+def write_json_atomically(path: str, data) -> bool:
+    """Write JSON via temp file + rename so a power loss can't leave a truncated file.
+
+    tmp_path is bound BEFORE json.dump: if the dump itself raises, the cleanup below
+    must still know which file to remove. Getting this wrong raises UnboundLocalError
+    out of the handler, which callers don't expect and which crashes the poll loop
+    *after* a Discord message has already been sent - producing a duplicate on every
+    subsequent poll, forever.
+    """
+    dir_path = os.path.dirname(os.path.abspath(path))
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile('w', dir=dir_path, suffix='.tmp', delete=False) as tmp:
+            tmp_path = tmp.name
+            json.dump(data, tmp)
+        os.replace(tmp_path, path)
+        return True
+    except OSError as e:
+        logger.error(f"Failed to save {path}: {e}")
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        return False
+
+def load_processed_emails() -> dict:
+    """Load already-processed email UIDs.
+
+    A dict (not a set) is used purely as an insertion-ordered set, so the newest IDs
+    are identifiable when the file is trimmed. Set iteration order is hash-based, which
+    made the old truncation drop an arbitrary subset instead of the oldest.
+    """
     if os.path.exists(PROCESSED_FILE):
         try:
             with open(PROCESSED_FILE, 'r') as f:
                 data = json.load(f)
-                return set(data.get('processed_ids', []))
+                return dict.fromkeys(data.get('processed_ids', []))
         except (json.JSONDecodeError, IOError):
-            return set()
-    return set()
+            return {}
+    return {}
 
-def save_processed_emails(processed_ids: set):
-    """Save the set of processed email IDs. Uses atomic write to prevent corruption on power loss."""
-    # Keep only the last 1000 IDs to prevent file from growing too large
-    ids_list = list(processed_ids)[-1000:]
-    dir_path = os.path.dirname(os.path.abspath(PROCESSED_FILE))
-    try:
-        with tempfile.NamedTemporaryFile('w', dir=dir_path, suffix='.tmp', delete=False) as tmp:
-            json.dump({'processed_ids': ids_list, 'last_updated': datetime.now().isoformat()}, tmp)
-            tmp_path = tmp.name
-        os.replace(tmp_path, PROCESSED_FILE)
-    except OSError as e:
-        logger.error(f"Failed to save processed emails: {e}")
-        # Clean up temp file if rename failed
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+def save_processed_emails(processed_ids: dict):
+    """Trim to the newest MAX_PROCESSED_IDS and save. Atomic; see write_json_atomically."""
+    # Trim in place so memory and file stay in agreement
+    while len(processed_ids) > MAX_PROCESSED_IDS:
+        processed_ids.pop(next(iter(processed_ids)))
+    write_json_atomically(PROCESSED_FILE, {
+        'processed_ids': list(processed_ids),
+        'last_updated': datetime.now().isoformat(),
+    })
 
 def load_recent_messages() -> dict:
     """Load recent Discord message IDs keyed by template name.
@@ -97,19 +128,32 @@ def load_recent_messages() -> dict:
     return {}
 
 def save_recent_messages(recent_messages: dict):
-    """Save recent Discord message IDs. Uses atomic write."""
-    dir_path = os.path.dirname(os.path.abspath(RECENT_MESSAGES_FILE))
-    try:
-        with tempfile.NamedTemporaryFile('w', dir=dir_path, suffix='.tmp', delete=False) as tmp:
-            json.dump(recent_messages, tmp)
-            tmp_path = tmp.name
-        os.replace(tmp_path, RECENT_MESSAGES_FILE)
-    except OSError as e:
-        logger.error(f"Failed to save recent messages: {e}")
+    """Save recent Discord message IDs. Atomic; see write_json_atomically."""
+    write_json_atomically(RECENT_MESSAGES_FILE, recent_messages)
+
+def prune_recent_messages(recent_messages: dict, window_minutes: int) -> bool:
+    """Drop code messages too old to be the one a sign-in used. Returns True if any went.
+
+    Without this, target selection only ranks candidates against each other and never
+    against the present, so a "new device" email will happily attach itself to a code
+    message from days earlier. Entries with an unreadable timestamp are dropped too -
+    an entry that can't be aged is exactly the kind that lingers forever.
+    """
+    cutoff = datetime.now() - timedelta(minutes=window_minutes)
+    stale = []
+    for name, entry in recent_messages.items():
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+            stored = datetime.fromisoformat(entry.get('timestamp', ''))
+        except (ValueError, TypeError):
+            logger.warning(f"Dropping '{name}' from recent messages: unreadable timestamp")
+            stale.append(name)
+            continue
+        if stored < cutoff:
+            logger.info(f"Expiring '{name}' from recent messages (older than {window_minutes} min)")
+            stale.append(name)
+    for name in stale:
+        del recent_messages[name]
+    return bool(stale)
 
 def decode_mime_header(header: str) -> str:
     """Decode a MIME-encoded email header."""
@@ -184,6 +228,23 @@ def get_email_body(msg) -> tuple:
 
     return body.strip(), html
 
+def html_to_text(html: str) -> str:
+    """Strip HTML to text while PRESERVING line breaks.
+
+    get_email_body's inline stripper collapses every run of whitespace to one space,
+    producing a single enormous line. Line-anchored regexes run against that output
+    silently capture hundreds of characters instead of one field, so patterns that read
+    structured detail out of an email must use this instead.
+    """
+    text = re.sub(r'<(script|style)[\s\S]*?</\1>', '', html, flags=re.IGNORECASE)
+    text = re.sub(r'<head[\s\S]*?</head>', '', text, flags=re.IGNORECASE)
+    # Block-level boundaries become newlines; everything else becomes a space
+    text = re.sub(r'<(?:br|/p|/div|/tr|/td|/table|/h[1-6]|/a|/li)[^>]*>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = html_lib.unescape(text)
+    lines = (re.sub(r'[^\S\n]+', ' ', line).strip() for line in text.split('\n'))
+    return '\n'.join(line for line in lines if line and line != '\xa0')
+
 def truncate_text(text: str, max_length: int = 1900) -> str:
     """Truncate text to fit Discord's message limit."""
     if len(text) <= max_length:
@@ -197,8 +258,9 @@ def parse_email_date(date_str: str) -> str:
         dt = parsedate_to_datetime(date_str)
         return dt.isoformat()
     except (ValueError, TypeError):
-        # If parsing fails, return current time
-        return datetime.now().isoformat()
+        # Fall back to now, with an explicit offset: Discord reads an offset-less
+        # timestamp as UTC, which would shift the displayed time by the host's offset.
+        return datetime.now().astimezone().isoformat()
 
 def find_matching_template(subject: str, templates: dict) -> tuple:
     """Find a template that matches the email subject."""
@@ -210,8 +272,6 @@ def find_matching_template(subject: str, templates: dict) -> tuple:
 
 def extract_template_info(body: str, html: str, template: dict) -> dict:
     """Extract info from email using template patterns."""
-    import re
-
     info = {}
 
     # Extract code using code_pattern if defined
@@ -224,11 +284,23 @@ def extract_template_info(body: str, html: str, template: dict) -> dict:
         except re.error as e:
             logger.warning(f"Invalid code_pattern: {code_pattern} - {e}")
 
-    # Extract info using info_pattern if defined
+    # Extract info using info_pattern if defined.
+    # Try plaintext first, then the HTML rendered to text: Netflix puts the
+    # "Requested by X from a Y at Z" line in the HTML part ONLY, so a plaintext-only
+    # search finds nothing on exactly the emails that carry the most detail.
     info_pattern = template.get('info_pattern')
     if info_pattern:
-        match = re.search(info_pattern, body, re.IGNORECASE)
-        if match:
+        haystacks = [body]
+        if html:
+            haystacks.append(html_to_text(html))
+        for haystack in haystacks:
+            try:
+                match = re.search(info_pattern, haystack, re.IGNORECASE)
+            except re.error as e:
+                logger.warning(f"Invalid info_pattern: {info_pattern} - {e}")
+                break
+            if not match:
+                continue
             # Map named groups first, fall back to positional
             groupdict = match.groupdict()
             if groupdict:
@@ -236,11 +308,12 @@ def extract_template_info(body: str, html: str, template: dict) -> dict:
             else:
                 groups = match.groups()
                 if len(groups) >= 1:
-                    info['name'] = groups[0]
+                    info['name'] = groups[0].strip() if groups[0] else None
                 if len(groups) >= 2:
                     info['device'] = groups[1].strip() if groups[1] else None
                 if len(groups) >= 3:
                     info['time'] = groups[2].strip() if groups[2] else None
+            break
 
     # Extract link using link_patterns if defined
     link_patterns = template.get('link_patterns', [])
@@ -249,7 +322,9 @@ def extract_template_info(body: str, html: str, template: dict) -> dict:
             try:
                 match = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
                 if match:
-                    info['link'] = match.group(1)
+                    # hrefs are HTML-escaped in source; without unescaping, '&amp;'
+                    # survives into the URL and the parameter after it is lost.
+                    info['link'] = html_lib.unescape(match.group(1))
                     break
             except re.error as e:
                 logger.warning(f"Invalid regex pattern: {pattern} - {e}")
@@ -273,14 +348,72 @@ def edit_discord_message(webhook_url: str, message_id: str, embed: dict) -> bool
         logger.error(f"Failed to edit Discord message {message_id}: {e}")
         return False
 
+def post_embed(webhooks: list, embed: dict, retries: int = 3) -> tuple:
+    """POST an embed to every webhook. Returns (any_succeeded, [{webhook, message_id}, ...]).
+
+    Every webhook is attempted - callers must not stop at the first success, or the
+    multi-channel support becomes single-channel support that happens to work when
+    there is only one channel configured.
+    """
+    payload = {"embeds": [embed]}
+    sent_messages = []
+    success = False
+
+    for webhook_url in webhooks:
+        delay = 2
+        for attempt in range(retries):
+            try:
+                # ?wait=true makes Discord return the created message, so we get its id
+                response = requests.post(f"{webhook_url}?wait=true", json=payload, timeout=10)
+                if response.status_code == 429:
+                    try:
+                        retry_after = float(response.json().get('retry_after', delay))
+                    except (ValueError, TypeError, AttributeError):
+                        retry_after = delay
+                    if attempt < retries - 1:
+                        logger.warning(f"Discord rate limited, waiting {retry_after}s")
+                        time.sleep(retry_after)
+                        delay *= 2
+                        continue
+                    # Falling out of the loop here used to be completely silent
+                    logger.error(f"Gave up after {retries} rate-limited attempts: {webhook_url[:50]}...")
+                    break
+                response.raise_for_status()
+                logger.info(f"Successfully sent to webhook: {webhook_url[:50]}...")
+
+                try:
+                    resp_data = response.json()
+                except ValueError:
+                    resp_data = {}
+                if resp_data.get('id'):
+                    sent_messages.append({
+                        "webhook": webhook_url,
+                        "message_id": resp_data['id'],
+                    })
+
+                success = True
+                break
+            except requests.exceptions.RequestException as e:
+                if attempt < retries - 1:
+                    logger.warning(f"Webhook failed (attempt {attempt + 1}/{retries}), retrying in {delay}s: {e}")
+                    time.sleep(delay)
+                    delay *= 2
+                else:
+                    logger.error(f"Failed to send to webhook after {retries} attempts: {webhook_url[:50]}... - {e}")
+
+    return success, sent_messages
+
 def send_to_discord(default_webhook, subject: str, sender: str, body: str, html: str, timestamp: str, templates: dict, recent_messages: dict):
     """Send an email notification to Discord via webhook."""
 
     # Normalize default webhook(s) to a list
     if isinstance(default_webhook, str):
         default_webhooks = [default_webhook]
-    else:
+    elif isinstance(default_webhook, (list, tuple)):
         default_webhooks = list(default_webhook)
+    else:
+        logger.error(f"discord_webhook must be a URL or a list of URLs, got {type(default_webhook).__name__}")
+        return False
 
     # Try to find a matching template
     template_name, template = find_matching_template(subject, templates)
@@ -302,7 +435,14 @@ def send_to_discord(default_webhook, subject: str, sender: str, body: str, html:
     if edit_targets:
         if isinstance(edit_targets, str):
             edit_targets = [edit_targets]
-        # Find the most recent matching message
+
+        window = template.get('edit_window_minutes', DEFAULT_EDIT_WINDOW_MINUTES)
+        # Expire first, then choose. Selecting by "newest candidate" alone compares
+        # candidates only to each other and never to the clock, which is how a sign-in
+        # ends up appended to a code request from days earlier.
+        if prune_recent_messages(recent_messages, window):
+            save_recent_messages(recent_messages)
+
         best_target = None
         best_time = None
         for target in edit_targets:
@@ -312,11 +452,12 @@ def send_to_discord(default_webhook, subject: str, sender: str, body: str, html:
                     best_time = ts
                     best_target = target
 
-    if edit_targets:
         template_info = extract_template_info(body, html, template)
 
         # Build the sign-in detail line (used for both edit and standalone)
         parts = []
+        if template_info.get('name'):
+            parts.append(template_info['name'])
         if template_info.get('device'):
             parts.append(template_info['device'])
         if template_info.get('location'):
@@ -327,6 +468,11 @@ def send_to_discord(default_webhook, subject: str, sender: str, body: str, html:
         field_name = template.get('edit_field_name', '✅ Signed In')
         edit_color = template.get('edit_color', 3066993)
 
+        # Channels that still need to hear about this sign-in. A channel is served
+        # either by editing its existing code message or by its own standalone post -
+        # never neither, which is what the old any_edited flag allowed.
+        pending_webhooks = list(webhooks)
+
         if best_target:
             prev = recent_messages[best_target]
             prev_messages = prev.get('messages', [])
@@ -334,7 +480,9 @@ def send_to_discord(default_webhook, subject: str, sender: str, body: str, html:
             if not prev_messages and prev.get('webhook'):
                 prev_messages = [{"webhook": prev['webhook'], "message_id": prev['message_id']}]
 
-            any_edited = False
+            pending_webhooks = [w for w in webhooks
+                                if w not in {m['webhook'] for m in prev_messages}]
+            edited = 0
             for msg in prev_messages:
                 try:
                     get_url = f"{msg['webhook']}/messages/{msg['message_id']}"
@@ -343,6 +491,7 @@ def send_to_discord(default_webhook, subject: str, sender: str, body: str, html:
                     original_embed = resp.json()['embeds'][0]
                 except Exception as e:
                     logger.error(f"Failed to fetch message {msg['message_id']}: {e}")
+                    pending_webhooks.append(msg['webhook'])
                     continue
 
                 # Append a new field to the original embed
@@ -356,17 +505,25 @@ def send_to_discord(default_webhook, subject: str, sender: str, body: str, html:
                 original_embed['color'] = edit_color
 
                 if edit_discord_message(msg['webhook'], msg['message_id'], original_embed):
-                    any_edited = True
+                    edited += 1
+                else:
+                    pending_webhooks.append(msg['webhook'])
 
-            if any_edited:
-                logger.info(f"Edited previous '{best_target}' message(s) with sign-in details")
-                del recent_messages[best_target]
-                save_recent_messages(recent_messages)
+            if edited:
+                logger.info(f"Edited {edited} previous '{best_target}' message(s) with sign-in details")
+
+            # Consume the entry either way: the code message is stale now, and leaving
+            # it behind lets an unrelated later sign-in append a second field to it.
+            del recent_messages[best_target]
+            save_recent_messages(recent_messages)
+
+            if pending_webhooks:
+                logger.warning(f"{len(pending_webhooks)} channel(s) could not be edited, posting standalone there")
+            else:
                 return True
 
-            logger.warning(f"Could not edit any previous messages, sending standalone instead")
-
-        # No code message to edit (or fetch failed) — send a clean standalone embed
+        # No code message to edit (expired, absent, or the edit failed) - post a
+        # standalone embed to every channel that has not been told yet.
         embed = {
             "title": f"{template.get('emoji', '📧')} {template.get('title', 'New Device Sign-In')}",
             "color": edit_color,
@@ -377,31 +534,38 @@ def send_to_discord(default_webhook, subject: str, sender: str, body: str, html:
                     "inline": False
                 }
             ],
-            "timestamp": parse_email_date(timestamp)
+            "timestamp": email_timestamp
         }
-        payload = {"embeds": [embed]}
-
-        for webhook_url in webhooks:
-            try:
-                response = requests.post(f"{webhook_url}?wait=true", json=payload, timeout=10)
-                if response.status_code == 429:
-                    retry_after = response.json().get('retry_after', 2)
-                    time.sleep(retry_after)
-                    response = requests.post(f"{webhook_url}?wait=true", json=payload, timeout=10)
-                response.raise_for_status()
-                logger.info(f"Sent standalone sign-in notification")
-                return True
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Failed to send standalone sign-in notification: {e}")
-        return False
+        success, _ = post_embed(pending_webhooks, embed)
+        if success:
+            logger.info("Sent standalone sign-in notification")
+        return success
 
     if template:
         # Use template-based formatting
         template_info = extract_template_info(body, html, template)
 
+        # .title() on the raw key would render the config's underscore
+        # ('netflix_access' -> 'Netflix_Access') straight into the footer
+        display_name = template.get('display_name', template_name.replace('_', ' ').title())
         emoji = template.get('emoji', '📧')
-        title = template.get('title', f'{template_name.title()} Code Requested')
+        title = template.get('title', f'{display_name} Code Requested')
         color = template.get('color', 3447003)
+        footer_text = template.get('footer_text', f"{display_name} Code • Expires in 15 minutes")
+
+        # Who asked, from what, and when - as one line at the bottom, so a later
+        # "signed in" edit appends its own field directly underneath it.
+        requester_parts = []
+        for key in ('name', 'device', 'location', 'time'):
+            if template_info.get(key):
+                requester_parts.append(template_info[key])
+        info_fields = []
+        if requester_parts:
+            info_fields.append({
+                "name": template.get('info_field_name', '📱 Requested By'),
+                "value": truncate_text(" • ".join(requester_parts), 1000),
+                "inline": False
+            })
 
         # Check if we have a code to display prominently
         if template_info.get('code'):
@@ -415,34 +579,13 @@ def send_to_discord(default_webhook, subject: str, sender: str, body: str, html:
                         "value": f"```{template_info['code']}```",
                         "inline": False
                     }
-                ],
+                ] + info_fields,
                 "footer": {
-                    "text": f"{template_name.title()} Code • Expires in 15 minutes"
+                    "text": footer_text
                 },
                 "timestamp": email_timestamp
             }
         else:
-            # No code - use standard template formatting
-            fields = []
-            if template_info.get('name'):
-                fields.append({
-                    "name": "Requested By",
-                    "value": template_info['name'],
-                    "inline": True
-                })
-            if template_info.get('device'):
-                fields.append({
-                    "name": "Device",
-                    "value": template_info['device'],
-                    "inline": True
-                })
-            if template_info.get('time'):
-                fields.append({
-                    "name": "Time",
-                    "value": template_info['time'],
-                    "inline": False
-                })
-
             # Build description with link if found
             description = "Someone requested a temporary access code."
             if template_info.get('link'):
@@ -454,9 +597,9 @@ def send_to_discord(default_webhook, subject: str, sender: str, body: str, html:
                 "title": f"{emoji} {title}",
                 "description": description,
                 "color": color,
-                "fields": fields,
+                "fields": info_fields,
                 "footer": {
-                    "text": f"{template_name.title()} Code • Expires in 15 minutes"
+                    "text": footer_text
                 },
                 "timestamp": email_timestamp
             }
@@ -488,46 +631,8 @@ def send_to_discord(default_webhook, subject: str, sender: str, body: str, html:
             "timestamp": email_timestamp
         }
 
-    payload = {
-        "embeds": [embed]
-    }
-
     # Send to all webhooks with retry logic
-    success = False
-    sent_messages = []
-    for webhook_url in webhooks:
-        retries = 3
-        delay = 2  # Start with 2 second delay
-
-        for attempt in range(retries):
-            try:
-                # Use ?wait=true to get the message ID back
-                response = requests.post(f"{webhook_url}?wait=true", json=payload, timeout=10)
-                if response.status_code == 429:
-                    retry_after = response.json().get('retry_after', delay)
-                    logger.warning(f"Discord rate limited, waiting {retry_after}s")
-                    time.sleep(retry_after)
-                    continue
-                response.raise_for_status()
-                logger.info(f"Successfully sent to webhook: {webhook_url[:50]}...")
-
-                # Collect message ID for potential future edits
-                resp_data = response.json()
-                if resp_data.get('id'):
-                    sent_messages.append({
-                        "webhook": webhook_url,
-                        "message_id": resp_data['id']
-                    })
-
-                success = True
-                break
-            except requests.exceptions.RequestException as e:
-                if attempt < retries - 1:
-                    logger.warning(f"Webhook failed (attempt {attempt + 1}/{retries}), retrying in {delay}s: {e}")
-                    time.sleep(delay)
-                    delay *= 2  # Exponential backoff
-                else:
-                    logger.error(f"Failed to send to webhook after {retries} attempts: {webhook_url[:50]}... - {e}")
+    success, sent_messages = post_embed(webhooks, embed)
 
     if success:
         logger.info(f"Email forwarded to Discord: {subject}")
@@ -553,7 +658,7 @@ def connect_to_imap(config: dict) -> imaplib.IMAP4_SSL:
         logger.error(f"IMAP connection failed: {e}")
         raise
 
-def check_for_new_emails(mail: imaplib.IMAP4_SSL, config: dict, processed_ids: set, recent_messages: dict) -> set:
+def check_for_new_emails(mail: imaplib.IMAP4_SSL, config: dict, processed_ids: dict, recent_messages: dict) -> dict:
     """Check for new emails and forward them to Discord."""
     try:
         # Select the inbox (or configured folder)
@@ -587,7 +692,10 @@ def check_for_new_emails(mail: imaplib.IMAP4_SSL, config: dict, processed_ids: s
                 # Fetch the email by UID
                 status, msg_data = mail.uid('fetch', email_uid, '(RFC822)')
 
-                if status != 'OK':
+                # A UID deleted or moved between SEARCH and FETCH (another mail client,
+                # the Gmail web UI, a phone) comes back as OK with [None], not an error
+                if status != 'OK' or not msg_data or not isinstance(msg_data[0], (tuple, list)):
+                    logger.warning(f"Could not fetch email UID {uid_str} - it may have been moved or deleted")
                     continue
 
                 # Parse the email
@@ -616,7 +724,7 @@ def check_for_new_emails(mail: imaplib.IMAP4_SSL, config: dict, processed_ids: s
                     matches = any(f.lower() in subject_lower for f in subject_filters)
                     if not matches:
                         logger.debug(f"Skipping email - subject doesn't match filters: {subject}")
-                        processed_ids.add(uid_str)
+                        processed_ids[uid_str] = None
                         if config.get('mark_as_read', True):
                             mail.uid('store', email_uid, '+FLAGS', '\\Seen')
                         continue
@@ -626,7 +734,7 @@ def check_for_new_emails(mail: imaplib.IMAP4_SSL, config: dict, processed_ids: s
 
                 # Send to Discord
                 if send_to_discord(config['discord_webhook'], subject, sender, body, html, date, templates, recent_messages):
-                    processed_ids.add(uid_str)
+                    processed_ids[uid_str] = None
 
                     # Mark as read if configured
                     if config.get('mark_as_read', True):
@@ -691,7 +799,9 @@ def main():
             # Keep connection alive with NOOP
             try:
                 mail.noop()
-            except:
+            except Exception:
+                # Deliberately not a bare except: that swallows the KeyboardInterrupt
+                # from Ctrl+C / a service stop and skips the clean-shutdown save below
                 mail = None
 
         except imaplib.IMAP4.error as e:
